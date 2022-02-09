@@ -4,9 +4,17 @@ import sys
 import platform
 import subprocess
 
-from distutils.version import LooseVersion
+from packaging import version
 from setuptools import setup, Extension, find_packages
 from setuptools.command.build_ext import build_ext
+
+# Convert distutils Windows platform specifiers to CMake -A arguments
+PLAT_TO_CMAKE = {
+    "win32": "Win32",
+    "win-amd64": "x64",
+    "win-arm32": "ARM",
+    "win-arm64": "ARM64",
+}
 
 class CMakeExtension(Extension):
     def __init__(self, name, sourcedir=''):
@@ -24,8 +32,8 @@ class CMakeBuild(build_ext):
 
         # self.debug = True
 
-        cmake_version = LooseVersion(re.search(r'version\s*([\d.]+)', out.decode()).group(1))
-        if cmake_version < '3.2.0':
+        cmake_version = version.parse(re.search(r'version\s*([\d.]+)', out.decode()).group(1))
+        if cmake_version < version.Version('3.2.0'):
             raise RuntimeError("CMake >= 3.2.0 is required")
 
         for ext in self.extensions:
@@ -34,26 +42,56 @@ class CMakeBuild(build_ext):
 
     def build_extension(self, ext):
         extdir = os.path.join(os.path.abspath(os.path.dirname(self.get_ext_fullpath(ext.name))),"igl")
-
-        cmake_args = ['-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=' + extdir,
-                      '-DPYTHON_EXECUTABLE=' + sys.executable]
-
-
+        
         cfg = 'Debug' if self.debug else 'Release'
-        build_args = ['--config', cfg]
-        cmake_args += ['-DCMAKE_BUILD_TYPE=' + cfg]
+
+        cmake_args = [
+            "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={}".format(extdir),
+            "-DPYTHON_EXECUTABLE={}".format(sys.executable),
+            "-DCMAKE_BUILD_TYPE={}".format(cfg),  # not used on MSVC, but no harm
+        ]
+
+        build_args = []
+
         # cmake_args += ['-DDEBUG_TRACE=ON']
 
-        if platform.system() == "Windows":
-            cmake_args += ['-DCMAKE_LIBRARY_OUTPUT_DIRECTORY_{}={}'.format(cfg.upper(), extdir)]
-            cmake_generator = os.environ.get('CMAKE_GENERATOR', '')
-            if cmake_generator != "NMake Makefiles" and "Ninja" not in cmake_generator:
-                if sys.maxsize > 2**32:
-                    cmake_args += ['-A', 'x64']
-                # build_args += ['--', '/m']
-        else:
-            build_args += ['--', '-j2']
+        # CMake lets you override the generator - we need to check this.
+        # Can be set with Conda-Build, for example.
+        cmake_generator = os.environ.get('CMAKE_GENERATOR', '')
+        
+        if self.compiler.compiler_type != "msvc":
+            # Using Ninja-build since it a) is available as a wheel and b)
+            # multithreads automatically. MSVC would require all variables be
+            # exported for Ninja to pick it up, which is a little tricky to do.
+            # Users can override the generator with CMAKE_GENERATOR in CMake
+            # 3.15+.
+            if not cmake_generator:
+                cmake_args += ["-GNinja"]
 
+        else:
+
+            # Single config generators are handled "normally"
+            single_config = any(x in cmake_generator for x in {"NMake", "Ninja"})
+
+            # CMake allows an arch-in-generator style for backward compatibility
+            contains_arch = any(x in cmake_generator for x in {"ARM", "Win64"})
+
+            # Specify the arch if using MSVC generator, but only if it doesn't
+            # contain a backward-compatibility arch spec already in the
+            # generator name.
+            if not single_config and not contains_arch:
+                cmake_args += ["-A", PLAT_TO_CMAKE[self.plat_name]]
+
+            # Multi-config generators have a different way to specify configs
+            if not single_config:
+                cmake_args += [
+                    "-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY_{}={}".format(cfg.upper(), extdir),
+                    "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY_{}={}".format(cfg.upper(), extdir),
+                    "-DCMAKE_RUNTIME_OUTPUT_DIRECTORY_{}={}".format(cfg.upper(), extdir)
+                ]
+                build_args += ["--config", cfg]
+
+        # Custom CMAKE ARGS and Compiler
         tmp = os.environ.get("AR", "")
         if "arm64-apple" in tmp:
             tmp = os.environ.get("CMAKE_ARGS", "")
@@ -83,7 +121,14 @@ class CMakeBuild(build_ext):
         env = os.environ.copy()
         env['CXXFLAGS'] = '{} -DVERSION_INFO=\\"{}\\"'.format(env.get('CXXFLAGS', ''),self.distribution.get_version())
 
-
+        # Set CMAKE_BUILD_PARALLEL_LEVEL to control the parallel build level
+        # across all generators.
+        if "CMAKE_BUILD_PARALLEL_LEVEL" not in os.environ:
+            # self.parallel is a Python 3 only way to set parallel jobs by hand
+            # using -j in the build_ext call, not supported by pip or PyPA-build.
+            if hasattr(self, "parallel") and self.parallel:
+                # CMake 3.12+ only.
+                build_args += ["-j{}".format(self.parallel)]
 
         tmp = os.getenv("target_platform", "")
         if tmp:
@@ -104,6 +149,7 @@ class CMakeBuild(build_ext):
 
         if not os.path.exists(self.build_temp):
             os.makedirs(self.build_temp)
+
         subprocess.check_call(['cmake', ext.sourcedir] + cmake_args, cwd=self.build_temp, env=env)
 
         subprocess.check_call(['cmake', '--build', '.'] + build_args, cwd=self.build_temp)
@@ -116,7 +162,7 @@ with open("README.md", "r") as fh:
 
 setup(
     name="igl",
-    version="2.2.1",
+    version="2022.2.0",
     author="libigl",
     author_email="",
     description="libigl Python Bindings",
