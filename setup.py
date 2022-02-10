@@ -4,7 +4,7 @@ import sys
 import platform
 import subprocess
 
-from packaging import version
+from distutils.version import LooseVersion
 from setuptools import setup, Extension, find_packages
 from setuptools.command.build_ext import build_ext
 
@@ -32,8 +32,8 @@ class CMakeBuild(build_ext):
 
         # self.debug = True
 
-        cmake_version = version.parse(re.search(r'version\s*([\d.]+)', out.decode()).group(1))
-        if cmake_version < version.Version('3.2.0'):
+        cmake_version = LooseVersion(re.search(r'version\s*([\d.]+)', out.decode()).group(1))
+        if cmake_version < '3.2.0':
             raise RuntimeError("CMake >= 3.2.0 is required")
 
         for ext in self.extensions:
