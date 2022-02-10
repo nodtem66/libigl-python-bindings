@@ -24,6 +24,7 @@ class CMakeExtension(Extension):
 
 class CMakeBuild(build_ext):
     def run(self):
+        build_ext.run(self)
         try:
             out = subprocess.check_output(['cmake', '--version'])
         except OSError:
